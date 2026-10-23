@@ -1,0 +1,8 @@
+packages:
+  - '.'
+
+# pnpm 10+ blocks dependency build scripts by default. esbuild (via tsx) is the
+# only dependency here that needs one; allowing it keeps a fresh
+# `pnpm install` clean on both pnpm 9 and pnpm 12.
+allowBuilds:
+  esbuild: true

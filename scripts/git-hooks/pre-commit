@@ -1,0 +1,141 @@
+#!/bin/sh
+# Leak guard: block personal identifiers and credentials from entering the repo.
+#
+#   (no args)   pre-commit mode — scan only the lines this commit stages
+#   --all       tree mode       — scan every tracked file (used by CI)
+#
+# It reports the rule and a count, and never echoes the matched text: printing
+# the hit would put the secret into the terminal scrollback or the CI log, i.e.
+# a second leak while fixing the first.
+#
+# Install:  cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Escape:   git commit --no-verify   (only when you know exactly what matched)
+
+set -u
+
+mode=staged
+case "${1:-}" in
+	--all) mode=all ;;
+	'') ;;
+	*)
+		printf '%s\n' "pre-commit: unknown option ${1}" >&2
+		exit 2
+		;;
+esac
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+	exit 0
+fi
+
+if [ "$mode" = all ]; then
+	files=$(git ls-files)
+else
+	files=$(git diff --cached --name-only --diff-filter=ACM)
+fi
+if [ -z "$files" ]; then
+	exit 0
+fi
+
+user=$(id -un)
+home=$(printenv HOME)
+
+# Fixed strings that identify this machine or its operator.
+literal_patterns=$(cat <<EOF
+$home
+/Users/$user
+/private/var/folders
+com.$user.
+TDAM_USER_KEY=
+EOF
+)
+
+# Credential shapes. Deliberately narrow: a noisy guard gets bypassed, so
+# anything that could hit a legitimate placeholder stays out.
+regex_patterns=$(cat <<'EOF'
+[?&]token=[A-Za-z0-9_.-]{16,}
+Bearer [A-Za-z0-9_.-]{20,}
+(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}
+sk-[A-Za-z0-9]{20,}
+BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY
+EOF
+)
+
+violations=0
+
+report() {
+	printf '%s\n' "  $1" >&2
+	violations=$((violations + 1))
+}
+
+content_of() {
+	if [ "$mode" = all ]; then
+		cat -- "$1" 2>/dev/null
+	else
+		# Added lines only, without the leading `+`, so existing history and
+		# context lines cannot trip the guard.
+		git diff --cached -U0 -- "$1" | sed -n '/^@@/,$p' | grep '^+' | grep -v '^+++' | sed 's/^+//'
+	fi
+}
+
+# Files that must never be tracked even if forced with `git add -f`.
+for f in $files; do
+	case "$f" in
+		.env|*.env|*credentials*|*secrets.env|*token.json|*state.json|*.pem)
+			report "forbidden path ($mode mode): $f"
+			;;
+	esac
+done
+
+for f in $files; do
+	# The guard's own pattern list contains literal secret shapes; without this
+	# skip it would block every commit that touches it, and would report itself
+	# when CI scans the whole tree.
+	case "$f" in scripts/git-hooks/pre-commit|.git/hooks/pre-commit) continue ;; esac
+
+	added=$(content_of "$f")
+	if [ -z "$added" ]; then
+		continue
+	fi
+
+	while IFS= read -r needle; do
+		[ -z "$needle" ] && continue
+		if printf '%s\n' "$added" | grep -qF -- "$needle"; then
+			count=$(printf '%s\n' "$added" | grep -cF -- "$needle")
+			report "$f: $count line(s) contain a machine-local string [redacted]"
+		fi
+	done <<EOF
+$literal_patterns
+EOF
+
+	while IFS= read -r rule; do
+		[ -z "$rule" ] && continue
+		if printf '%s\n' "$added" | grep -qE -- "$rule"; then
+			count=$(printf '%s\n' "$added" | grep -cE -- "$rule")
+			report "$f: $count line(s) matched a credential/identifier rule [redacted]"
+		fi
+	done <<EOF
+$regex_patterns
+EOF
+done
+
+if [ "$violations" -gt 0 ]; then
+	if [ "$mode" = all ]; then
+		{
+			printf '\nleak guard (all mode): %d tracked file(s) or line(s) above match.\n' "$violations"
+			echo 'Nothing was printed from the matched lines. Inspect them yourself with:  cat <file>'
+			echo 'These are already committed, so scrubbing the working tree is not enough: rewrite the'
+			echo 'content, commit it, and rotate whatever the value protects. History still holds the old'
+			echo 'blob until the branch is replaced.'
+		} >&2
+	else
+		{
+			printf '\nleak guard (staged mode): refused the commit, %d issue(s) above.\n' "$violations"
+			echo 'Nothing was printed from the matched lines. Inspect them yourself with:  git diff --cached -- <file>'
+			echo 'Nothing is committed yet — fix the content and stage it again. If the value was real,'
+			echo 'rotate it, since it sat in a file on disk.'
+		} >&2
+	fi
+	exit 1
+fi
+
+exit 0

@@ -14,19 +14,24 @@ DeepSeek Harness 的两阶段任务确认 host 插件。它不依赖任何具体
 git clone https://github.com/czdtech/dsh-task-confirm.git
 cd dsh-task-confirm
 pnpm install
-pnpm build
 
 # 把本仓库的绝对路径加进 web profile
 dsh plugin --profile web add /absolute/path/to/dsh-task-confirm
 ```
 
-也可以直接从 GitHub 安装；pnpm 会执行 `prepare` 自动构建：
+`lib/` 已随仓库发布，克隆后不需要编译。改过 `src/` 才需要 `pnpm build`，并把 `lib/` 一起提交。
+
+也可以直接从 GitHub 安装，安装时不需要执行构建：
 
 ```bash
 dsh plugin --profile web add github:czdtech/dsh-task-confirm
 ```
 
 安装后重载插件或重启宿主。插件自带的 `cordis.patch.yml` 会把自己插入 profile，不需要再改其他配置文件。
+
+插件默认 `enabled: true`，**装上即生效**；如果只想安装暂不启用，先在 profile 配置里把 `enabled` 设为 `false`，或装好后在设置页关闭。
+
+如果本地 pnpm 仍提示 `Ignored build scripts`（旧版工具链），运行 `pnpm approve-builds` 允许 `esbuild`，或确认 `pnpm-workspace.yaml` 里的 `allowBuilds` 已生效。
 
 ## 它做什么
 
@@ -130,6 +135,8 @@ pnpm typecheck
 pnpm test
 pnpm build
 ```
+
+`lib/` 随仓库发布：改完 `src/` 后运行 `pnpm build` 并提交 `lib/`，CI 会检查 `lib/` 与 `src/` 是否一致。CI 还会执行泄露守卫（`sh scripts/git-hooks/pre-commit --all`），该脚本也可复制到 `.git/hooks/pre-commit` 作为提交前检查。
 
 `typecheck` 同时覆盖 `src/` 与 `test/`。测试用假 ctx 装配插件（不是真实 Cordis 上下文），验证提示注入、工具拒绝、真人确认后放行、TTL 过期、状态快照、`/api` 状态/取消路由、volatile 配置热更新（标记/词表/白名单/启用开关）与子代理放行；另用 Node `vm` 加载 `client.js`，检查设置卡片的槽位注册与 API 路径。测试不调用模型，也不写入任何真实目录。`client.js` 是手写浏览器模块，改动后用 `node --check client.js` 做语法检查。
 
